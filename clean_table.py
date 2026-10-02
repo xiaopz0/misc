@@ -5,11 +5,13 @@ clean_table.py - Extract just the data table from an OCR'd screenshot/photo and 
 Input is the word-level CSV from photo_to_csv.py (<photo>.csv). The script:
 
   1. Groups words into rows by their position on the image.
-  2. Finds the data block: the longest run of rows with a similar number of words.
-     Window titles, menus, shell prompts and footers are dropped. The row just
-     above the block is kept as the header when it fits the columns.
-  3. Works out column boundaries from the data rows ONLY, so a long title line
+  2. Works out column boundaries from typical rows only, so a long title line
      spanning the whole image cannot hide the gaps between columns.
+  3. Keeps the longest run of rows that fill at least half the columns (one weak
+     row in a row is tolerated). Window titles, menus, shell prompts and footers
+     fill only a column or two and are dropped. A first row with no digits above
+     rows that have digits is treated as the header. Use --all to keep every
+     row that fills enough columns, or --rows to pick the range by hand.
   4. Re-joins timestamps that landed in a date cell and a time cell.
   5. Fixes OCR character confusions in cells that are mostly digits:
      @ © O o Q D -> 0,  l I | ! -> 1,  S -> 5,  B -> 8,  Z -> 2,  ':' or ',' as decimal point.
@@ -65,32 +67,58 @@ def fix_cell(text):
     return " ".join(fix_token(tok) for tok in text.split())
 
 
-def find_data_block(rows, tolerance=1):
-    """Longest run of consecutive rows whose word count stays within `tolerance` of the first."""
-    counts = [len(r) for r in rows]
+def typical_rows(rows):
+    """Rows whose word count is close to the median: used to measure the columns."""
+    counts = sorted(len(r) for r in rows if len(r) >= 2)
+    if not counts:
+        return rows
+    med = counts[len(counts) // 2]
+    slack = max(2, round(0.35 * med))
+    return [r for r in rows if abs(len(r) - med) <= slack]
+
+
+def find_data_block(grid, min_fill=0.5, max_gap=1):
+    """Longest run of rows that fill at least `min_fill` of the columns.
+
+    Up to `max_gap` consecutive weak rows inside the run are tolerated (an OCR
+    row that lost a few cells), so one bad line does not cut the table in two.
+    """
+    ncols = len(grid[0])
+    good = [sum(1 for c in r if c) >= min_fill * ncols for r in grid]
     best = (0, 0)
     i = 0
-    while i < len(rows):
-        if counts[i] < 2:
+    while i < len(grid):
+        if not good[i]:
             i += 1
             continue
-        j, target = i, counts[i]
-        while j < len(rows) and counts[j] >= 2 and abs(counts[j] - target) <= tolerance:
+        j, gap = i, 0
+        last_good = i
+        while j < len(grid):
+            if good[j]:
+                gap, last_good = 0, j
+            else:
+                gap += 1
+                if gap > max_gap:
+                    break
             j += 1
-        if j - i > best[1] - best[0]:
-            best = (i, j)
-        i = j
-    # Trim leading/trailing rows that do not match the block's dominant word count
-    # (a header or footer line that happened to be within tolerance).
-    start, end = best
-    if end - start >= 3:
-        block = counts[start:end]
-        mode = max(set(block), key=block.count)
-        while end - start > 2 and counts[start] != mode:
-            start += 1
-        while end - start > 2 and counts[end - 1] != mode:
-            end -= 1
-    return start, end
+        if last_good + 1 - i > best[1] - best[0]:
+            best = (i, last_good + 1)
+        i = last_good + 1
+    return best
+
+
+def looks_numeric(cell):
+    return bool(cell) and any(ch.isdigit() for ch in cell)
+
+
+def split_header(block):
+    """If the first row has no numbers while the rows below do, it is the header."""
+    if len(block) >= 2:
+        first_num = sum(looks_numeric(c) for c in block[0])
+        rest_num = sum(looks_numeric(c) for c in block[1]) + (sum(looks_numeric(c) for c in block[2]) if len(block) > 2 else 0)
+        if first_num == 0 and rest_num >= 2:
+            return block[0], block[1:]
+    return None, block
 
 
 def fix_decimal_colons(grid):
@@ -104,13 +132,6 @@ def fix_decimal_colons(grid):
             for r in grid:
                 r[c] = re.sub(r"^([-+]?\d+):(\d{2})$", r"\1.\2", r[c])
     return grid
-
-
-def header_fits(header_row, edges, ncols):
-    """A header row is usable if its words each sit in a column and no two share one."""
-    from words_to_table import column_of
-    cols = [column_of(w["cx"], edges) for w in header_row]
-    return len(set(cols)) >= max(2, ncols - 1)
 
 
 def merge_split_timestamps(grid, header):
@@ -145,9 +166,13 @@ def main():
     ap.add_argument("csv", help="word CSV from photo_to_csv.py (not the _table.csv)")
     ap.add_argument("-o", "--output", help="output CSV (default: <name>_clean.csv)")
     ap.add_argument("--rows", help="row range to keep, e.g. 4:20 (0-based, end exclusive); skips auto-detect")
+    ap.add_argument("--all", action="store_true",
+                    help="keep every row that fills enough columns, not just the longest block")
+    ap.add_argument("--min-fill", type=float, default=0.5,
+                    help="a row counts as data when this fraction of columns is filled (default 0.5)")
     ap.add_argument("--min-gap", type=float, help="column gutter width in px (default 1.2 x median word height)")
     ap.add_argument("--min-conf", type=float, default=0, help="drop words below this OCR confidence")
-    ap.add_argument("--no-header", action="store_true")
+    ap.add_argument("--no-header", action="store_true", help="treat the first kept row as data")
     ap.add_argument("--no-fix", action="store_true")
     ap.add_argument("--show", action="store_true")
     args = ap.parse_args()
@@ -157,24 +182,46 @@ def main():
         sys.exit("no words found")
     rows = group_rows(words)
 
-    if args.rows:
-        a, b = args.rows.split(":")
-        start, end = int(a or 0), int(b or len(rows))
-    else:
-        start, end = find_data_block(rows)
-        if end - start < 2:
-            sys.exit("could not find a data block; use --rows START:END")
-    data_rows = rows[start:end]
+    def measure(sample_rows):
+        sample_words = [w for r in sample_rows for w in r]
+        heights = sorted(w["h"] for w in sample_words)
+        gap = args.min_gap if args.min_gap is not None else 1.2 * heights[len(heights) // 2]
+        return find_column_edges(sample_words, gap), gap
 
-    data_words = [w for r in data_rows for w in r]
-    heights = sorted(w["h"] for w in data_words)
-    min_gap = args.min_gap if args.min_gap is not None else 1.2 * heights[len(heights) // 2]
-    edges = find_column_edges(data_words, min_gap)
+    def select(edges):
+        full_grid = build_grid(rows, edges)
+        ncols = len(edges) + 1
+        if args.rows:
+            a, b = args.rows.split(":")
+            start, end = int(a or 0), int(b or len(rows))
+            idx = list(range(start, end))
+            label = f"rows {start}:{end}"
+        elif args.all:
+            idx = [i for i, r in enumerate(full_grid) if sum(1 for c in r if c) >= args.min_fill * ncols]
+            label = f"{len(idx)} rows that fill >= {args.min_fill:.0%} of columns"
+        else:
+            start, end = find_data_block(full_grid, args.min_fill)
+            if end - start < 2:
+                sys.exit("could not find a data block; try --all, a lower --min-fill, or --rows START:END")
+            idx = list(range(start, end))
+            label = f"rows {start}:{end}"
+        return idx, [full_grid[i] for i in idx], label
 
-    header = None
-    if not args.no_header and start > 0 and header_fits(rows[start - 1], edges, len(edges) + 1):
-        header = build_grid([rows[start - 1]], edges)[0]
-    grid = build_grid(data_rows, edges)
+    # Pass 1: measure columns on typical rows, find the data rows.
+    # Pass 2: re-measure columns on those data rows only, so a full-width title
+    # or menu line cannot hide the gaps between columns, then select again.
+    edges, min_gap = measure(typical_rows(rows))
+    idx, _, _ = select(edges)
+    edges, min_gap = measure([rows[i] for i in idx])
+    idx, block, kept = select(edges)
+    dropped = len(rows) - len(block)
+
+    header, grid = (None, block) if args.no_header else split_header(block)
+    grid = [r[:] for r in grid]
+    if header:
+        header = header[:]
+    if not grid:
+        sys.exit("no data rows left")
 
     grid, header = drop_empty_columns(grid, header)
     if not args.no_fix:
@@ -187,8 +234,9 @@ def main():
     with open(output, "w", newline="", encoding="utf-8") as f:
         csv.writer(f).writerows(out_rows)
 
-    print(f"kept rows {start}:{end} of {len(rows)} ({'header + ' if header else ''}{len(grid)} data rows, "
-          f"{len(grid[0])} columns, gutter >= {min_gap:.0f}px) -> {output}", file=sys.stderr)
+    print(f"kept {kept} of {len(rows)} OCR rows, dropped {dropped} "
+          f"({'header + ' if header else ''}{len(grid)} data rows, {len(grid[0])} columns, "
+          f"gutter >= {min_gap:.0f}px) -> {output}", file=sys.stderr)
     if args.show:
         widths = [max(len(r[c]) for r in out_rows) for c in range(len(out_rows[0]))]
         for r in out_rows:
