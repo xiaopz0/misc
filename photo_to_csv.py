@@ -7,6 +7,7 @@ its position on the image, OCR confidence, and whether it looks like a number.
 
 Requirements:
     pip install pytesseract pillow
+    pip install pillow-heif        # only needed for iPhone .HEIC photos
     Tesseract engine:  apt install tesseract-ocr   (Debian/Ubuntu)
                        brew install tesseract      (macOS)
                        https://github.com/UB-Mannheim/tesseract/wiki (Windows)
@@ -31,6 +32,13 @@ try:
     import pytesseract
 except ImportError:
     sys.exit("Missing dependencies. Run:  pip install pytesseract pillow")
+
+# Optional: iPhone HEIC/HEIF photos.  pip install pillow-heif
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+except ImportError:
+    pass
 
 # Matches integers, decimals, thousands separators, percentages, currency.
 NUMBER_RE = re.compile(r"^[\$€£]?[-+]?\d[\d,]*(\.\d+)?%?$")
