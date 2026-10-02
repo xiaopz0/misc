@@ -3,14 +3,15 @@
 #
 # For each photo it ALWAYS re-runs OCR (existing CSVs are overwritten) and writes:
 #   <photo>.csv          word-level OCR (text, position, confidence)
-#   <photo>_table.csv    the table rebuilt as a grid, one cell per column
+#   <photo>_table.csv    everything on the image rebuilt as a grid
+#   <photo>_clean.csv    just the data table: chrome removed, OCR digit errors fixed
 #
 # Usage:
 #   ./photos_to_tables.sh                     # photos in the current folder
 #   ./photos_to_tables.sh ~/Pictures/tables   # another folder
-#   ./photos_to_tables.sh . --min-gap 40      # extra flags go to words_to_table.py
+#   ./photos_to_tables.sh . --min-gap 40      # extra flags go to words_to_table.py and clean_table.py
 #
-# Needs photo_to_csv.py and words_to_table.py in the same folder as this script.
+# Needs photo_to_csv.py, words_to_table.py and clean_table.py in the same folder as this script.
 
 set -euo pipefail
 
@@ -19,8 +20,9 @@ shift || true
 here="$(dirname "$0")"
 ocr="$here/photo_to_csv.py"
 tbl="$here/words_to_table.py"
+cln="$here/clean_table.py"
 
-for f in "$ocr" "$tbl"; do
+for f in "$ocr" "$tbl" "$cln"; do
     [[ -f "$f" ]] || { echo "missing $f" >&2; exit 1; }
 done
 
@@ -36,7 +38,8 @@ for photo in "${photos[@]}"; do
     base="${photo%.*}"
     echo "--- $(basename "$photo")"
     if python "$ocr" "$photo" --psm 6 -o "$base.csv" \
-       && python "$tbl" "$base.csv" -o "${base}_table.csv" "$@"; then
+       && python "$tbl" "$base.csv" -o "${base}_table.csv" "$@" \
+       && python "$cln" "$base.csv" -o "${base}_clean.csv" "$@"; then
         ok=$((ok + 1))
     else
         echo "FAILED: $photo" >&2
