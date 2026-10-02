@@ -19,6 +19,9 @@ Usage:
     python photo_to_csv.py photo.jpg --lines             # one row per line instead of per word
     python photo_to_csv.py photo.jpg --min-conf 60       # drop low-confidence words
     python photo_to_csv.py photo.jpg --lang eng+fra      # other Tesseract languages
+    python photo_to_csv.py table.jpg --psm 6             # better for tables/receipts
+
+To rebuild a photographed table as a grid, feed the output to words_to_table.py.
 """
 
 import argparse
@@ -73,7 +76,7 @@ def preprocess(image, scale=2):
     return img
 
 
-def ocr_words(path, lang="eng", min_conf=0, no_preprocess=False):
+def ocr_words(path, lang="eng", min_conf=0, no_preprocess=False, psm=3):
     """Run OCR and return a list of word-level dicts."""
     if Path(path).suffix.lower() in (".heic", ".heif") and not HEIF_OK:
         sys.exit(f"{path} is a HEIC photo. Install the decoder with the same Python "
@@ -81,7 +84,8 @@ def ocr_words(path, lang="eng", min_conf=0, no_preprocess=False):
     with Image.open(path) as im:
         img = im.copy() if no_preprocess else preprocess(im)
 
-    data = pytesseract.image_to_data(img, lang=lang, output_type=pytesseract.Output.DICT)
+    data = pytesseract.image_to_data(img, lang=lang, config=f"--psm {psm}",
+                                     output_type=pytesseract.Output.DICT)
     rows = []
     for i in range(len(data["text"])):
         text = data["text"][i].strip()
@@ -134,6 +138,9 @@ def main():
     ap.add_argument("--min-conf", type=float, default=0, help="drop words below this confidence (0-100)")
     ap.add_argument("--lines", action="store_true", help="one row per text line instead of per word")
     ap.add_argument("--no-preprocess", action="store_true", help="feed the raw image to Tesseract")
+    ap.add_argument("--psm", type=int, default=3,
+                    help="Tesseract page segmentation mode. 3 = auto (default), "
+                         "6 = single uniform block, best for tables and receipts")
     args = ap.parse_args()
 
     output = Path(args.output) if args.output else Path(args.images[0]).with_suffix(".csv")
@@ -144,7 +151,7 @@ def main():
             print(f"skipping {img_path}: not found", file=sys.stderr)
             continue
         try:
-            rows = ocr_words(img_path, args.lang, args.min_conf, args.no_preprocess)
+            rows = ocr_words(img_path, args.lang, args.min_conf, args.no_preprocess, args.psm)
         except pytesseract.TesseractNotFoundError:
             sys.exit("Tesseract engine not found. Install it (see header of this script) "
                      "or set pytesseract.pytesseract.tesseract_cmd to its path.")
