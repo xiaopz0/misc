@@ -37,8 +37,9 @@ except ImportError:
 try:
     from pillow_heif import register_heif_opener
     register_heif_opener()
+    HEIF_OK = True
 except ImportError:
-    pass
+    HEIF_OK = False
 
 # Matches integers, decimals, thousands separators, percentages, currency.
 NUMBER_RE = re.compile(r"^[\$€£]?[-+]?\d[\d,]*(\.\d+)?%?$")
@@ -74,6 +75,9 @@ def preprocess(image, scale=2):
 
 def ocr_words(path, lang="eng", min_conf=0, no_preprocess=False):
     """Run OCR and return a list of word-level dicts."""
+    if Path(path).suffix.lower() in (".heic", ".heif") and not HEIF_OK:
+        sys.exit(f"{path} is a HEIC photo. Install the decoder with the same Python "
+                 f"you run this script with:\n    {sys.executable} -m pip install pillow-heif")
     with Image.open(path) as im:
         img = im.copy() if no_preprocess else preprocess(im)
 
